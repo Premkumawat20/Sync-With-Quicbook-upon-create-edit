@@ -1,0 +1,83 @@
+ ---
+  Step-by-Step Breakdown
+  
+  Step 1 — Flow triggers the Apex Action
+
+  When your Flow hits the "Create QuickBooks Customer" action element,
+  Salesforce calls:
+
+  @InvocableMethod(label='Create QuickBooks Customer')
+  public static void createCustomer(List<CustomerInput> inputs)
+
+  The @InvocableMethod annotation is what makes this method visible to Flow. The
+  Flow passes field values (name, email, phone, etc.) into the CustomerInput
+  object — each field mapped in Flow corresponds to an @InvocableVariable in the
+  CustomerInput inner class.
+
+  ---
+  Step 2 — Builds the QuickBooks customer object
+
+  CustomerInput input = inputs.get(0);  // always takes the first record
+
+  QBCustomerInput customer = new QBCustomerInput();
+  customer.DisplayName = input.quickbooksName;
+  // ... maps all fields
+
+  It takes the Flow input and maps it into a QBCustomerInput object — which is a
+  separate class that matches QuickBooks' API expected format. Email and Phone
+  are nested objects because QuickBooks API expects them that way:
+
+  QBCustomerInput.PrimaryEmailAddr email = new
+  QBCustomerInput.PrimaryEmailAddr();
+  email.Address = input.primaryEmail;
+  customer.PrimaryEmailAddr = email;
+
+  ---
+  Step 3 — Why it serializes to JSON and calls @future
+  
+  String customerJson = System.JSON.serialize(customer);
+  QBCreateCustomerAction.createCustomerAsync(customerJson);
+
+  This is solving a critical Salesforce limitation:
+
+  ▎ You cannot make an HTTP callout in the same transaction as a DML operation.
+
+  Flows often do DML (insert/update records) before calling an Apex action. If
+  you tried to make the QuickBooks API call directly in createCustomer(),
+  Salesforce would throw a System.CalloutException: You have uncommitted work 
+  pending.
+
+  The fix:
+  - Serialize the object to a JSON string (since @future methods can only accept
+  primitive types — no objects)
+  - Hand it off to createCustomerAsync() which runs in a separate transaction
+  where callouts are allowed
+
+  ---
+  Step 4 — @future method makes the actual API call
+
+  @future(callout=true)
+  public static void createCustomerAsync(String customerJson) {
+      QBCustomerInput customer = (QBCustomerInput)
+  System.JSON.deserialize(customerJson, QBCustomerInput.class);
+      QBSyncCustomer.createCustomer(customer);
+  }
+
+  - Deserializes the JSON string back into a QBCustomerInput object
+  - Calls QBSyncCustomer.createCustomer(customer) — this is where the actual
+  HTTP POST to QuickBooks API happens (defined in the QBSyncCustomer class)
+  - callout=true on @future explicitly enables HTTP callouts in that async
+  context
+
+  ---
+  Flow of Data — Visual Summary
+  
+  Flow (passes field values)
+          ↓
+  createCustomer() — builds QBCustomerInput, serializes to JSON
+          ↓
+  createCustomerAsync() — @future, new transaction
+          ↓
+  QBSyncCustomer.createCustomer() — HTTP callout to QuickBooks API
+
+  ---
